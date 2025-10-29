@@ -1,0 +1,40 @@
+name: Multi Token Price Monitor
+
+on:
+  schedule:
+    - cron: "*/1 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check_prices:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Monitor Tokens
+        run: |
+          tokens=$(cat tokens.json)
+          for row in $(echo "$tokens" | jq -c '.[]'); do
+            symbol=$(echo "$row" | jq -r '.symbol')
+            threshold=$(echo "$row" | jq -r '.threshold')
+
+            response=$(curl -s "https://api.binance.com/api/v3/ticker/price?symbol=${symbol}")
+            price=$(echo "$response" | jq -r '.price')
+
+            echo "Symbol: $symbol | Price: $price | Threshold: $threshold"
+
+            if (( $(echo "$price < $threshold" | bc -l) )); then
+              message="${symbol} price dropped: ${price} (< ${threshold})"
+              echo "Alert: $message"
+
+              curl -X POST "${{ secrets.NOTIFY_URL }}" \
+                -H "Authorization: Bearer ${{ secrets.NOTIFY_TOKEN }}" \
+                -H "Content-Type: application/json" \
+                -d "{\"message\": \"${message}\", \"pipe\": 1}"
+            fi
+
+          done
