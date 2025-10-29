@@ -2,39 +2,65 @@ name: Multi Token Price Monitor
 
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/10 * * * *"   # 每 10 分钟执行一次
   workflow_dispatch:
 
 jobs:
   check_prices:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install jq
-        run: sudo apt-get install -y jq
+      - name: Show repo files (debug)
+        run: ls -la
 
-      - name: Monitor Tokens
+      - name: Monitor tokens and send alerts
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
         run: |
-          tokens=$(cat tokens.json)
-          for row in $(echo "$tokens" | jq -c '.[]'); do
+          set -eu
+
+          if [ ! -f tokens.json ]; then
+            echo "ERROR: tokens.json not found in repo root"
+            exit 1
+          fi
+
+          echo "tokens.json content:"
+          cat tokens.json
+
+          for row in $(jq -c '.[]' tokens.json); do
             symbol=$(echo "$row" | jq -r '.symbol')
             threshold=$(echo "$row" | jq -r '.threshold')
 
-            response=$(curl -s "https://api.binance.com/api/v3/ticker/price?symbol=${symbol}")
-            price=$(echo "$response" | jq -r '.price')
+            echo "-----"
+            echo "Checking symbol: $symbol  threshold: $threshold"
 
-            echo "Symbol: $symbol | Price: $price | Threshold: $threshold"
+            resp=$(curl -s "https://api.binance.com/api/v3/ticker/price?symbol=${symbol}")
+            price=$(echo "$resp" | jq -r '.price // empty')
 
-            if (( $(echo "$price < $threshold" | bc -l) )); then
+            if [ -z "$price" ]; then
+              echo "WARN: No price data for ${symbol}"
+              echo "Binance response: $resp"
+              continue
+            fi
+
+            echo "Current price: $price"
+
+            is_less=$(awk "BEGIN{print ($price < $threshold) ? 1 : 0}")
+            if [ "$is_less" -eq 1 ]; then
               message="${symbol} price dropped: ${price} (< ${threshold})"
-              echo "Alert: $message"
+              echo "ALERT: $message"
 
-              curl -X POST "${{ secrets.NOTIFY_URL }}" \
-                -H "Authorization: Bearer ${{ secrets.NOTIFY_TOKEN }}" \
+              http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$NOTIFY_URL" \
+                -H "Authorization: Bearer $NOTIFY_TOKEN" \
                 -H "Content-Type: application/json" \
-                -d "{\"message\": \"${message}\", \"pipe\": 1}"
+                -d "{\"message\":\"${message}\",\"pipe\":1}")
+
+              echo "Notify response HTTP code: $http_code"
+            else
+              echo "OK: price >= threshold"
             fi
 
           done
